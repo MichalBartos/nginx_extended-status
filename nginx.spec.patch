@@ -1,0 +1,78 @@
+*** nginx.spec	2014-03-21 10:25:22.663605547 +0100
+--- nginx_new.spec	2014-03-21 10:22:09.666322385 +0100
+***************
+*** 8,14 ****
+  Summary: High performance web server
+  Name: nginx
+  Version: 1.5.10
+! Release: 1%{?dist}.ngx
+  Vendor: nginx inc.
+  URL: http://nginx.org/
+  
+--- 8,14 ----
+  Summary: High performance web server
+  Name: nginx
+  Version: 1.5.10
+! Release: 2%{?dist}.ngx
+  Vendor: nginx inc.
+  URL: http://nginx.org/
+  
+***************
+*** 22,27 ****
+--- 22,32 ----
+  Source7: nginx.suse.init
+  Source8: nginx.service
+  Source9: nginx.upgrade.sh
++ Source10:config
++ Source11:ngx_http_extended_status_module.c
++ Source12:ngx_http_extended_status_module.h
++ 
++ Patch0:  %{_sourcedir}/extended_status-1.5.10.patch
+  
+  License: 2-clause BSD-like license
+  %if 0%{?suse_version}
+***************
+*** 63,69 ****
+--- 68,76 ----
+  Not stripped version of nginx built with the debugging log support.
+  
+  %prep
++ %define  debug_package %{nil}
+  %setup -q
++ %patch0 -p1
+  
+  %build
+  ./configure \
+***************
+*** 99,104 ****
+--- 106,112 ----
+          --with-file-aio \
+          --with-ipv6 \
+          --with-debug \
++ 	--add-module=%{_sourcedir}/ \
+          --with-cc-opt="%{optflags} $(pcre-config --cflags)" \
+          $*
+  make %{?_smp_mflags}
+***************
+*** 136,141 ****
+--- 144,150 ----
+          --with-mail_ssl_module \
+          --with-file-aio \
+          --with-ipv6 \
++ 	--add-module=%{_sourcedir}/ \
+          --with-cc-opt="%{optflags} $(pcre-config --cflags)" \
+          $*
+  make %{?_smp_mflags}
+***************
+*** 304,309 ****
+--- 313,323 ----
+  fi
+  
+  %changelog
++ * Thu Mar 13  2014 Michal Bartos  <mb@stable.cz>
++ * 1.5.10-2
++ - added extended status plugin
++ 
++ 
+  * Tue Feb  4 2014 Sergey Budnevitch <sb@nginx.com>
+  * 1.5.10
