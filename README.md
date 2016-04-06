@@ -4,7 +4,7 @@ This repo contains:
 
 Modified patch file from david-benes: extended_status-1.5.10.patch
 
-Added a patch file to support nginx-1.9.7
+Added a patch file to support nginx-1.9.7: [extended_status-1.9.7.4.patch](https://github.com/rohitjoshi/nginx_extended-status/blob/master/extended_status-1.9.7.4.patch)
 
 original file https://github.com/david-benes/ngx_http_extended_status_module/commit/7b4f66313d6092c29e2fe9f5c8ddcdda7bba21ae
 
