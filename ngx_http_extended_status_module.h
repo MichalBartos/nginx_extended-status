@@ -1,4 +1,14 @@
+#define SERVER_CONN_STATS "{\n  \"server\" : {\"host\" : \"%s\",\"nginx-version\" : \"%s\"},\n  \"connection_info\" : { \"active_connections\" : %uA, \"server_accepts\" : %uA, \"handled\" : %uA, \"requests\" : %uA, \"reading\" : %uA, \"writing\" : %uA, \"waiting\" : %uA },\n  \"workers\" : [ "
+                            
 
+                     
+#define WORKER_STATS "\n      { \"pid\" : %5d, \"num_req_served\": %d, \"operation_mode\": \"%c\", \"cpu\": %.2f, \"mbytes\": %.2f }%c"   
+
+#define CONNNECTIONS_STATS ",\n  \"connections\": [ "
+
+#define CONNECTION_STATS "%c\n    { \"worker\": \"%4d-%04d\" , \"operation_mode\": \"%c\" , \"num_req_served\": %d , \"mbytes\": %.2f , \"client\" : \"%s\" , \"vhost\": \"%s\" , \"seconds_since_req_completion\": %d , \"status\" : %ui , \"response_time\" :  %d , \"upstream_response_time\" :%d , \"request\" : \"%s\" }"                             
+
+#define CONNNECTIONS_CLOSE_STATS "\n   ]\n}"
 
 #define  HTML_HEADER    "<html><head><title>Nginx Status</title>\n" \
         "<script type=text/javascript src=tablesort.min.js></script>\n" \

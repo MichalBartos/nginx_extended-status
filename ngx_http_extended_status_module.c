@@ -12,6 +12,12 @@
 extern  ngx_uint_t  ngx_num_workers;
 
 static char  * ngx_http_set_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void* ngx_http_extended_status_content_type_json_create_loc_conf(ngx_conf_t *cf);
+static char* ngx_http_extended_status_content_type_json_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+
+typedef struct {
+    ngx_str_t   extended_status_content_type_json;
+} ngx_http_extended_status_content_type_json_loc_conf_t;
 
 static ngx_command_t  ngx_http_status_commands[] = {
 
@@ -20,6 +26,13 @@ static ngx_command_t  ngx_http_status_commands[] = {
       ngx_http_set_status,
       0,
       0,
+      NULL },
+
+      { ngx_string("extended_status_content_type_json"),
+      NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_str_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_extended_status_content_type_json_loc_conf_t, extended_status_content_type_json),
       NULL },
 
       ngx_null_command
@@ -36,8 +49,8 @@ static ngx_http_module_t  ngx_http_extended_status_module_ctx = {
     NULL,                                  /* create server configuration */
     NULL,                                  /* merge server configuration */
 
-    NULL,                                  /* create location configuration */
-    NULL                                   /* merge location configuration */
+    ngx_http_extended_status_content_type_json_create_loc_conf,                                  /* create location configuration */
+    ngx_http_extended_status_content_type_json_merge_loc_conf                                   /* merge location configuration */
 };
 
 
@@ -254,6 +267,132 @@ put_header(ngx_http_request_t  *r)
 
 
 static ngx_chain_t *
+put_server_stats(ngx_http_request_t  *r)
+{
+    ngx_chain_t  *c;
+    ngx_buf_t  *b;
+    u_char  *hostname; 
+    size_t  size, worker_size ;
+    worker_score  *ws;
+    ngx_atomic_int_t  ap, hn, ac, rq, rd, wr;
+    ngx_msec_int_t  response_time;
+    int active;
+    ngx_uint_t i;
+    uint32_t       hz = sysconf(_SC_CLK_TCK);
+
+    ap = *ngx_stat_accepted;
+    hn = *ngx_stat_handled;
+    ac = *ngx_stat_active;
+    rq = *ngx_stat_requests;
+    rd = *ngx_stat_reading;
+    wr = *ngx_stat_writing;
+
+     response_time = get_int_from_query(r, "res", 3);
+    if (response_time < 0)
+        response_time = DEFAULT_REQ_VALUE;
+    active = get_int_from_query(r, "active", 6);
+
+
+
+    size = sizeof(SERVER_CONN_STATS) + ngx_cycle->hostname.len + sizeof(NGINX_VERSION) + (NGX_ATOMIC_T_LEN * 7) ;
+
+    worker_size = sizeof(WORKER_STATS) + 5 /*pid*/ + NGX_INT64_LEN /*num_req*/  + 5 /*cpu*/ + NGX_INT64_LEN /*mbytes*/ + 1 /*ending ,*/;
+   
+    size += ( worker_size * ngx_num_workers);    
+
+    b = ngx_create_temp_buf(r->pool, size);
+    if (b == NULL) 
+        return NULL;
+    c =  ngx_pcalloc(r->pool, sizeof(ngx_chain_t));
+    if (c == NULL) 
+        return NULL;
+
+    hostname = get_hostname(r);
+    if (hostname == NULL)
+        return NULL;
+
+    b->last = ngx_sprintf(b->last, SERVER_CONN_STATS, hostname, NGINX_VERSION, ac, ap, hn, rq, rd, wr, ac - (rd + wr));
+
+    for (i = 0; i < ngx_num_workers; i++) {
+       ws = (worker_score *) ((char *)workers + WORKER_SCORE_LEN * i);
+ 
+       b->last = ngx_sprintf(b->last, WORKER_STATS, ws->pid, ws->access_count, ws->mode, (ws->times.tms_utime + ws->times.tms_stime + 
+                               ws->times.tms_cutime + ws->times.tms_cstime) / (float) hz, (float) ws->bytes_sent / MBYTE, i < (ngx_num_workers - 1) ? ',': ']');
+    
+    }
+    c->buf = b;
+    c->next = NULL;
+
+    return c;
+}
+
+static ngx_chain_t *
+put_conn_stats(ngx_http_request_t  *r)
+{
+    ngx_msec_int_t  response_time;  
+    conn_score     *cs;
+    ngx_uint_t      i, j, k, first;
+    int             active;
+    ngx_chain_t   *c;
+    ngx_buf_t     *b;
+    size_t   sizePerConn;
+    size_t   sizePerWorker;
+
+    response_time = get_int_from_query(r, "res", 3);
+    if (response_time < 0)
+        response_time = DEFAULT_REQ_VALUE;
+    active = get_int_from_query(r, "active", 6);
+
+   
+    sizePerConn =  sizeof(CONNECTION_STATS) + (4 + 4) + NGX_INT64_LEN + 0 + NGX_INT64_LEN + SCORE__CLIENT_LEN +  SCORE__VHOST_LEN + 5 + NGX_INT64_LEN + 3 + NGX_INT64_LEN + NGX_INT64_LEN + SCORE__REQUEST_LEN;
+    sizePerWorker = sizePerConn * ngx_cycle->connection_n;
+   
+   
+    b = ngx_create_temp_buf(r->pool, sizeof(CONNNECTIONS_STATS) + sizePerWorker + sizeof(CONNNECTIONS_CLOSE_STATS));  
+    if (b == NULL) 
+        return NULL;
+    c  = ngx_pcalloc(r->pool, sizeof(ngx_chain_t));
+    if (c == NULL) 
+        return NULL;
+
+    c->buf = b;
+    c->next = NULL;
+
+    b->last = ngx_sprintf(b->last, CONNNECTIONS_STATS);
+    first = 0;
+    for (i = 0; i < ngx_num_workers; i++) {
+        for ( j = 0 ; j < ngx_cycle->connection_n ; j++ ) {
+           k = i * ngx_cycle->connection_n + j ;
+           cs = (conn_score *) ((char *)conns + sizeof(conn_score) * k);
+
+           if (cs->response_time < response_time || 
+                '\0' ==  cs->client [0] || 
+                '\0' == cs->request [0] || 
+                '\0' == cs->vhost [0])
+               continue;
+           if (0 < active && 0 == cs->active)
+               continue;
+           
+           b->last = ngx_sprintf(b->last, "%c\n    { \"worker\": \"%04d-%04d\" ", (first>0)?',':' ',i, j);
+           b->last = ngx_sprintf(b->last, ", \"operation_mode\": \"%c\" ", cs->mode);
+           b->last = ngx_sprintf(b->last, ", \"num_req_served\": %d , \"mbytes\": %.2f ", cs->access_count, cs->bytes_sent);
+           b->last = ngx_sprintf(b->last, ", \"client\" : \"%s\" , \"vhost\": \"%s\" ", cs->client, cs->vhost);
+           b->last = ngx_sprintf(b->last, ", \"seconds_since_req_completion\": %d , \"status\" : %ui ", how_long_ago_used(cs->last_used), cs->status);
+           b->last = ngx_sprintf(b->last, ", \"response_time\" :  %d , \"upstream_response_time\" :%d ", cs->response_time, cs->upstream_response_time>0?cs->upstream_response_time:0);
+           b->last = ngx_sprintf(b->last, ", \"request\" : \"%s\" }", cs->request);
+          
+         
+       }
+    }
+
+    b->last = ngx_sprintf(b->last, CONNNECTIONS_CLOSE_STATS);
+    c->next = NULL;
+    return c;
+
+}
+
+
+static ngx_chain_t *
 put_server_info(ngx_http_request_t  *r)
 {
     ngx_chain_t  *c;
@@ -274,8 +413,7 @@ put_server_info(ngx_http_request_t  *r)
         return NULL;
 
     b->last = ngx_sprintf(b->last, SERVER_INFO, hostname, NGINX_VERSION);
-    b->last = ngx_sprintf(b->last, "<hr /><br>"); 
-
+     
     c->buf = b;
     c->next = NULL;
 
@@ -380,30 +518,31 @@ put_worker_status(ngx_http_request_t *r)
         return NULL;
 
     b->last = ngx_sprintf(b->last, WORKER_TABLE_HEADER);
-    for (i = 0; i < ngx_num_workers; i++) {
-	ws = (worker_score *) ((char *)workers + WORKER_SCORE_LEN * i);
 
-	b->last = ngx_sprintf(b->last, "<tr><td align=center>%4d</td>", i);	
-	b->last = ngx_sprintf(b->last, "<td> %5d </td>", ws->pid);    
-	b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", ws->access_count);
-	b->last = ngx_sprintf(b->last, "<td align=center><b> %c </b></td>", ws->mode);    
-	b->last = ngx_sprintf(b->last, "<td> %.2f </td>",   
+    for (i = 0; i < ngx_num_workers; i++) {
+	   ws = (worker_score *) ((char *)workers + WORKER_SCORE_LEN * i);
+
+	   b->last = ngx_sprintf(b->last, "<tr><td align=center>%4d</td>", i);	
+	   b->last = ngx_sprintf(b->last, "<td> %5d </td>", ws->pid);    
+	   b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", ws->access_count);
+	   b->last = ngx_sprintf(b->last, "<td align=center><b> %c </b></td>", ws->mode);    
+	   b->last = ngx_sprintf(b->last, "<td> %.2f </td>",   
                               (ws->times.tms_utime + ws->times.tms_stime + 
                                ws->times.tms_cutime + ws->times.tms_cstime) / (float) hz);
-	b->last = ngx_sprintf(b->last, "<td align=right> %.2f </td></tr>", (float) ws->bytes_sent / MBYTE);
+	   b->last = ngx_sprintf(b->last, "<td align=right> %.2f </td></tr>", (float) ws->bytes_sent / MBYTE);
 
-	tmp_idx = index;
-	past = current;
-	for (j = 0; j < PERIOD_L; j++) {
-	    if (past == ws->recent_request_cnt [tmp_idx].time) {
-	        query_cnt_2 += ws->recent_request_cnt [tmp_idx].cnt;
-		if (j < PERIOD_S)
-		    query_cnt_1 += ws->recent_request_cnt [tmp_idx].cnt;
-	    }
+	   tmp_idx = index;
+	   past = current;
+	   for (j = 0; j < PERIOD_L; j++) {
+	       if (past == ws->recent_request_cnt [tmp_idx].time) {
+	           query_cnt_2 += ws->recent_request_cnt [tmp_idx].cnt;
+		      if (j < PERIOD_S)
+		      query_cnt_1 += ws->recent_request_cnt [tmp_idx].cnt;
+	       }
 
 	    tmp_idx = dec_qps_index(tmp_idx);	    
 	    past -= 1;
-	}
+	   }
     }
     b->last = ngx_sprintf(b->last, "</table>\n<br><br>");	    
     b->last = ngx_sprintf(b->last, "<b>Requests/sec: %.02f (last %2d seconds), %.02f (last %2d seconds) &nbsp; &nbsp; at %s</b><br>", 
@@ -463,43 +602,43 @@ put_connection_status(ngx_http_request_t *r)
     b->last = ngx_sprintf(b->last, CONNECTION_TABLE_HEADER, sortingColumns(r));
     for (i = 0; i < ngx_num_workers; i++) {
         for ( j = 0 ; j < ngx_cycle->connection_n ; j++ ) {
-	    k = i * ngx_cycle->connection_n + j ;
-	    cs = (conn_score *) ((char *)conns + sizeof(conn_score) * k);
+	       k = i * ngx_cycle->connection_n + j ;
+	       cs = (conn_score *) ((char *)conns + sizeof(conn_score) * k);
 
-	    if (cs->response_time < response_time || 
+	       if (cs->response_time < response_time || 
                 '\0' ==  cs->client [0] || 
                 '\0' == cs->request [0] || 
                 '\0' == cs->vhost [0])
-	        continue;
-	    if (0 < active && 0 == cs->active)
-	        continue;
+	           continue;
+	       if (0 < active && 0 == cs->active)
+	           continue;
 
-	    b->last = ngx_sprintf(b->last, "<tr><td align=center>%4d-%04d</td>", i, j);
+	       b->last = ngx_sprintf(b->last, "<tr><td align=center>%4d-%04d</td>", i, j);
 	    
-	    b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->access_count);
-	    b->last = ngx_sprintf(b->last, "<td align=center><b>%c</b></td>", cs->mode);	    
-	    b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->bytes_sent);
+	       b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->access_count);
+	       b->last = ngx_sprintf(b->last, "<td align=center><b>%c</b></td>", cs->mode);	    
+	       b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->bytes_sent);
 	    
-	    b->last = ngx_sprintf(b->last, "<td> %s </td>", cs->client);
-	    b->last = ngx_sprintf(b->last, "<td> %s </td>", cs->vhost);
+	       b->last = ngx_sprintf(b->last, "<td> %s </td>", cs->client);
+	       b->last = ngx_sprintf(b->last, "<td> %s </td>", cs->vhost);
 	
-	    if (0 != cs->zin && 0 != cs->zout)
-	        b->last = ngx_sprintf(b->last, "<td align=right> %.02f </td>", get_gzip_ratio(cs->zin, cs->zout));
-	    else
-	        b->last = ngx_sprintf(b->last, "<td align=center> - </td>");
+	       if (0 != cs->zin && 0 != cs->zout)
+	           b->last = ngx_sprintf(b->last, "<td align=right> %.02f </td>", get_gzip_ratio(cs->zin, cs->zout));
+	       else
+	           b->last = ngx_sprintf(b->last, "<td align=center> - </td>");
 
-	    b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", how_long_ago_used(cs->last_used));
-	    b->last = ngx_sprintf(b->last, "<td align=right> %ui </td>", cs->status);
+	       b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", how_long_ago_used(cs->last_used));
+	       b->last = ngx_sprintf(b->last, "<td align=right> %ui </td>", cs->status);
 
-	    b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->response_time);
+	       b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->response_time);
 
-	    if (0 <= cs->upstream_response_time)
-	        b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->upstream_response_time);	
-	    else
-	        b->last = ngx_sprintf(b->last, "<td align=center><b>-</b></td>");	
+	       if (0 <= cs->upstream_response_time)
+	           b->last = ngx_sprintf(b->last, "<td align=right> %d </td>", cs->upstream_response_time);	
+	       else
+	           b->last = ngx_sprintf(b->last, "<td align=center><b>-</b></td>");	
 
-	    b->last = ngx_sprintf(b->last, "<td> %s </td></tr>", cs->request);
-	}
+	       b->last = ngx_sprintf(b->last, "<td> %s </td></tr>", cs->request);
+	   }
         
         if (i + 1 < ngx_num_workers)
             b = ngx_create_temp_buf(r->pool, sizePerWorker);
@@ -518,7 +657,7 @@ put_connection_status(ngx_http_request_t *r)
     }
 
     b->last = ngx_sprintf(b->last, "</tbody></table><hr /><br>\n");
-
+    c->next = NULL;
     return c;
 }
 
@@ -588,6 +727,9 @@ ngx_http_status_handler(ngx_http_request_t *r)
 {
     ngx_chain_t  *fc, *mc, *lc;
     ngx_int_t    rc;
+    int content_type_json;
+
+    content_type_json = 0;
 
     if (NGX_HTTP_GET != r->method)
         return NGX_HTTP_NOT_ALLOWED;
@@ -595,49 +737,81 @@ ngx_http_status_handler(ngx_http_request_t *r)
     rc = ngx_http_discard_request_body(r);
     if (rc != NGX_OK) 
         return rc;
+    ngx_http_extended_status_content_type_json_loc_conf_t *extcf;
+    extcf = ngx_http_get_module_loc_conf(r, ngx_http_extended_status_module);
 
-    r->headers_out.content_type.len  = sizeof( "text/html; charset=ISO-8859-1" ) - 1;
-    r->headers_out.content_type.data = (u_char *) "text/html; charset=ISO-8859-1";
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "extcf %p", extcf);
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                           "&extcf->extended_status_content_type_json %d", ngx_strlen(&extcf->extended_status_content_type_json));
+    if(ngx_strlen(&extcf->extended_status_content_type_json) > 0){
+       content_type_json = 1;
+    }
+    if (content_type_json == 1) {
+      r->headers_out.content_type.len  = sizeof( "text/json;" ) - 1;
+      r->headers_out.content_type.data = (u_char *) "text/json;";
+    }else {
+        r->headers_out.content_type.len  = sizeof( "text/html; charset=ISO-8859-1" ) - 1;
+        r->headers_out.content_type.data = (u_char *) "text/html; charset=ISO-8859-1";
+    }
+    
 
     rc = set_refresh_header_field(r);
     if ( rc != NGX_OK)
         return rc;
 
-    fc = put_header(r);
-    if (fc == NULL)
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    lc = get_lastChain(fc);
+    if (content_type_json == 1) {
+        fc = put_server_stats(r);
+        if (fc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    
+        lc = get_lastChain(fc);
 
-    mc = put_server_info(r);
-    if (mc == NULL)
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    lc->next = mc;
-    lc = get_lastChain(mc);
+        mc = put_conn_stats(r);
+        if (mc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc->next = mc;
+        lc = get_lastChain(mc);
+    }else {
 
-    mc = put_basic_status(r);
-    if (mc == NULL)
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    lc->next = mc;
-    lc = get_lastChain(mc);
+        fc = put_header(r);
+        if (fc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc = get_lastChain(fc);
 
-    mc = put_worker_status(r);
-    if (mc == NULL)
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    lc->next = mc;
-    lc = get_lastChain(mc);
+        mc = put_server_info(r);
+        if (mc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc->next = mc;
+        lc = get_lastChain(mc);
 
-    mc = put_connection_status(r);
-    if (mc == NULL)
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    lc->next = mc;
-    lc = get_lastChain(mc);
+        mc = put_basic_status(r);
+        if (mc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc->next = mc;
+        lc = get_lastChain(mc);
 
-    mc = put_footer(r);
-    if (mc == NULL)
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
-    lc->next = mc;
-    lc = get_lastChain(mc);
+        mc = put_worker_status(r);
+        if (mc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc->next = mc;
+        lc = get_lastChain(mc);
 
+    
+        mc = put_connection_status(r);
+        if (mc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc->next = mc;
+        lc = get_lastChain(mc);
+
+
+        mc = put_footer(r);
+        if (mc == NULL)
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        lc->next = mc;
+        lc = get_lastChain(mc);
+    }
     lc->buf->last_buf = 1;
 
     r->headers_out.status = NGX_HTTP_OK;
@@ -658,6 +832,42 @@ ngx_http_set_status(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
     clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
     clcf->handler = ngx_http_status_handler;
+
+    return NGX_CONF_OK;
+}
+
+
+static void *
+ngx_http_extended_status_content_type_json_create_loc_conf(ngx_conf_t *cf)
+{
+    ngx_http_extended_status_content_type_json_loc_conf_t  *conf;
+
+    conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_extended_status_content_type_json_loc_conf_t));
+    if (conf == NULL) {
+        return NGX_CONF_ERROR;
+    }
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
+                           "conf->extended_status_content_type_json %s", conf->extended_status_content_type_json);
+    
+    //conf->enable = NGX_CONF_UNSET;
+    return conf;
+}
+
+static char *
+ngx_http_extended_status_content_type_json_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+    ngx_http_extended_status_content_type_json_loc_conf_t *prev = parent;
+    ngx_http_extended_status_content_type_json_loc_conf_t *conf = child;
+
+    //ngx_conf_merge_value(conf->enable, prev->enable, 0);
+    ngx_conf_merge_str_value(conf->extended_status_content_type_json, prev->extended_status_content_type_json, "");
+
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, cf->log, 0,
+                           "conf->extended_status_content_type_json %s", conf->extended_status_content_type_json);
+    
+
+    //if(conf->enable)
+    //    ngx_http_json_status_init(conf);
 
     return NGX_CONF_OK;
 }
